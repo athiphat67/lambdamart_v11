@@ -258,7 +258,7 @@ def run_predictor():
         # ยัด Feature ทั้ง 30 ตัวลงไปใน Payload
         data_to_insert.update(features_dict_lower)
 
-        db_out.table("gold_paper_trades").insert(data_to_insert).execute()
+        db_out.table("gold_paper_ml_trades_big_v12").insert(data_to_insert).execute()
         print(f"✅ Predictor Done: {current_time} | Score: {ai_score:.4f} | Signal: {signal}")
 
     except Exception as e:
@@ -270,7 +270,7 @@ def run_predictor():
 def run_tracker():
     print("🕵️‍♂️ Running Tracker Pipeline...")
     try:
-        res = db_out.table("gold_paper_trades").select("*").eq("status", "PENDING").execute()
+        res = db_out.table("gold_paper_ml_trades_big_v12").select("*").eq("status", "PENDING").execute()
         pending_orders = res.data
         
         if not pending_orders:
@@ -314,7 +314,7 @@ def run_tracker():
 
             if status != "PENDING":
                 pnl = exit_price - order['entry_price']
-                db_out.table("gold_paper_trades").update({
+                db_out.table("gold_paper_ml_trades_big_v12").update({
                     "status": status,
                     "exit_price": exit_price,
                     "exit_time": current_time.isoformat(),
