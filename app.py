@@ -1,4 +1,4 @@
-# app_v2.py  — ArgMax Sniper V11  (7 bugs fixed)
+# app_v2.py  — ArgMax Sniper V11  (8 bugs fixed)
 # ─────────────────────────────────────────────────────────────────────────────
 # FIX SUMMARY
 #   [BUG-1] Tracker: data fetched DESC → iloc[0] was newest tick, not oldest.
@@ -16,6 +16,8 @@
 #   [BUG-7] Tracker: time_diff used iloc[0]['Datetime'] (newest tick) as
 #           "current time" → SESSION_END triggered immediately for old orders.
 #           Fixed as part of BUG-1 (now using datetime.now for wall-clock check).
+#   [BUG-8] pd.to_datetime format mismatch on mixed fractional seconds.
+#           Fixed by enforcing format='ISO8601' and safely handling tz_localize.
 # ─────────────────────────────────────────────────────────────────────────────
 
 import os
@@ -56,7 +58,7 @@ MIN_RANKER_SCORE = 0.0744
 #   Night     18:00 – 01:59  → ends 02:00 next day
 SESSION_END_HOUR = {'Morning': 12, 'Afternoon': 18, 'Night': 2}
 
-FEATURE_COLS = [
+FEATURE_COLS =[
     'F_Syn_Price', 'F_Thai_Premium', 'F_Corr_XAU_USD',
     'F_ATR_48', 'F_Regime', 'F_XAU_Mom_Short', 'F_XAU_Mom_Mid', 'F_USD_Mom',
     'F_FSP', 'F_SA_TWAP_Dev', 'F_SA_MDD', 'F_SA_Vol',
@@ -151,7 +153,7 @@ def compute_session_features(df: pd.DataFrame) -> pd.DataFrame:
         group['F_SA_Position'] = (prices - s_min) / s_range.clip(lower=1)
         return group
 
-    META_COLS   = ['Session_ID', 'Session_Type', 'Bar_In_Session', 'Expected_Session_Length']
+    META_COLS   =['Session_ID', 'Session_Type', 'Bar_In_Session', 'Expected_Session_Length']
     meta_backup = df[META_COLS].copy()
     df = df.groupby('Session_ID', group_keys=False).apply(session_features)
     for col in META_COLS:
@@ -227,8 +229,14 @@ def run_predictor():
         res_hsh = db_in.table("gold_prices_hsh").select("timestamp, ask_96, bid_96").order("timestamp", desc=True).limit(30000).execute()
         res_ig  = db_in.table("gold_prices_ig").select("timestamp, spot_price, usd_thb").order("timestamp", desc=True).limit(30000).execute()
 
-        df_hsh = pd.DataFrame(res_hsh.data).set_index(pd.to_datetime([x['timestamp'] for x in res_hsh.data])).sort_index()
-        df_ig  = pd.DataFrame(res_ig.data).set_index(pd.to_datetime([x['timestamp'] for x in res_ig.data])).sort_index()
+        if not res_hsh.data or not res_ig.data:
+            print("ℹ️  Not enough data for predictor.")
+            return
+
+        # ── FIX BUG-8: Use format='ISO8601' to handle mixed fractional seconds ──
+        df_hsh = pd.DataFrame(res_hsh.data).set_index(pd.to_datetime([x['timestamp'] for x in res_hsh.data], format='ISO8601')).sort_index()
+        df_ig  = pd.DataFrame(res_ig.data).set_index(pd.to_datetime([x['timestamp'] for x in res_ig.data], format='ISO8601')).sort_index()
+        # ─────────────────────────────────────────────────────────────────────────
 
         df_hsh['HSH_Sell_Sim'] = df_hsh['ask_96'].astype(float)
         df_hsh['HSH_Buy_Sim']  = df_hsh['bid_96'].astype(float)
@@ -378,8 +386,19 @@ def run_tracker():
             .limit(500)                        # wider window to catch TP/SL hits
             .execute()
         )
+        
         df_hsh = pd.DataFrame(res_hsh.data)
-        df_hsh['Datetime'] = pd.to_datetime(df_hsh['timestamp']).dt.tz_convert('Asia/Bangkok')
+        if df_hsh.empty:
+            print("ℹ️  No price data to track.")
+            return
+            
+        # ── FIX BUG-8: Use format='ISO8601' and safely handle timezone ───────────
+        dts = pd.to_datetime(df_hsh['timestamp'], format='ISO8601')
+        if dts.dt.tz is None:
+            df_hsh['Datetime'] = dts.dt.tz_localize('Asia/Bangkok')
+        else:
+            df_hsh['Datetime'] = dts.dt.tz_convert('Asia/Bangkok')
+            
         df_hsh = df_hsh.sort_values('Datetime').reset_index(drop=True)
         # ─────────────────────────────────────────────────────────────────────────
 
