@@ -8,6 +8,7 @@ import warnings
 from fastapi import FastAPI, BackgroundTasks
 import uvicorn
 from datetime import datetime
+import pytz
 
 warnings.filterwarnings('ignore')
 
@@ -100,8 +101,9 @@ def compute_macro_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def compute_session_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    expected_length = {'Morning': 18, 'Afternoon': 27, 'Night': 48}
-    df['Expected_Session_Length'] = df['Session_Type'].map(expected_length).fillna(18)
+    # 🌟 แก้ไข: ปรับ Expected Length ให้ตรงกับตอน Train
+    expected_length = {'Morning': 36, 'Afternoon': 36, 'Night': 48}
+    df['Expected_Session_Length'] = df['Session_Type'].map(expected_length).fillna(36)
 
     def session_features(group):
         prices = group['HSH_Sell_Sim']
@@ -218,7 +220,15 @@ def run_predictor():
         df_features = df_features.ffill().fillna(0)
 
         latest_bar = df_features.iloc[[-1]]
-        current_time = str(latest_bar.index[0])
+        
+        # 🌟 แก้ไข: บังคับ Timezone ให้เป็น Asia/Bangkok (+07:00)
+        bkk_tz = pytz.timezone('Asia/Bangkok')
+        raw_time = latest_bar.index[0]
+        if raw_time.tzinfo is None:
+            current_time = bkk_tz.localize(raw_time).isoformat()
+        else:
+            current_time = raw_time.astimezone(bkk_tz).isoformat()
+            
         current_price = float(latest_bar['HSH_Sell_Sim'].values[0])
         session_id = latest_bar['Session_ID'].values[0]
         
@@ -230,7 +240,7 @@ def run_predictor():
         dynamic_tp = max(float(latest_bar['ATR_14D'].values[0]) * 0.5, 150.0)
         dynamic_sl = -max(float(latest_bar['ATR_14D'].values[0]) * 1.0, 300.0)
 
-        # 🌟 ดึง Feature ทั้ง 30 ตัวมาแปลงเป็นตัวพิมพ์เล็ก
+        # ดึง Feature ทั้ง 30 ตัวมาแปลงเป็นตัวพิมพ์เล็ก
         features_dict = latest_bar[FEATURE_COLS].iloc[0].to_dict()
         features_dict_lower = {k.lower(): float(v) for k, v in features_dict.items()}
 
@@ -245,10 +255,10 @@ def run_predictor():
             "status": "PENDING" if signal == "BUY" else "IGNORED"
         }
         
-        # 🌟 ยัด Feature ทั้ง 30 ตัวลงไปใน Payload
+        # ยัด Feature ทั้ง 30 ตัวลงไปใน Payload
         data_to_insert.update(features_dict_lower)
 
-        db_out.table("gold_paper_ml_trades_big_v12").insert(data_to_insert).execute()
+        db_out.table("gold_paper_trades").insert(data_to_insert).execute()
         print(f"✅ Predictor Done: {current_time} | Score: {ai_score:.4f} | Signal: {signal}")
 
     except Exception as e:
@@ -260,7 +270,7 @@ def run_predictor():
 def run_tracker():
     print("🕵️‍♂️ Running Tracker Pipeline...")
     try:
-        res = db_out.table("gold_paper_ml_trades_big_v12").select("*").eq("status", "PENDING").execute()
+        res = db_out.table("gold_paper_trades").select("*").eq("status", "PENDING").execute()
         pending_orders = res.data
         
         if not pending_orders:
@@ -269,10 +279,16 @@ def run_tracker():
 
         res_hsh = db_in.table("gold_prices_hsh").select("timestamp, bid_96").order("timestamp", desc=True).limit(100).execute()
         df_hsh = pd.DataFrame(res_hsh.data)
-        df_hsh['Datetime'] = pd.to_datetime(df_hsh['timestamp'])
+        # แปลงเวลาจาก DB ให้เป็น Timezone Aware (UTC -> BKK) เพื่อให้เทียบกันได้
+        df_hsh['Datetime'] = pd.to_datetime(df_hsh['timestamp']).dt.tz_convert('Asia/Bangkok')
         
         for order in pending_orders:
             order_time = pd.to_datetime(order['candle_time'])
+            if order_time.tzinfo is None:
+                order_time = pytz.timezone('Asia/Bangkok').localize(order_time)
+            else:
+                order_time = order_time.astimezone(pytz.timezone('Asia/Bangkok'))
+
             future_prices = df_hsh[df_hsh['Datetime'] > order_time]
             
             if future_prices.empty:
@@ -298,10 +314,10 @@ def run_tracker():
 
             if status != "PENDING":
                 pnl = exit_price - order['entry_price']
-                db_out.table("gold_paper_ml_trades_big_v12").update({
+                db_out.table("gold_paper_trades").update({
                     "status": status,
                     "exit_price": exit_price,
-                    "exit_time": str(current_time),
+                    "exit_time": current_time.isoformat(),
                     "pnl_thb": pnl
                 }).eq("id", order['id']).execute()
                 print(f"🎯 Order {order['id']} closed as {status} | PnL: {pnl:.2f} THB")
