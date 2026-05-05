@@ -50,8 +50,11 @@ BKK_TZ = pytz.timezone('Asia/Bangkok')
 
 MIN_RANKER_SCORE = 0.0744
 
-# Session wall-clock end hours (BKK) — used by BUG-4 fix
-SESSION_END_HOUR = {'Morning': 14, 'Afternoon': 19, 'Night': 6}
+# Session boundaries (BKK / UTC+7)
+#   Morning   06:00 – 11:59  → ends 12:00 same day
+#   Afternoon 12:00 – 17:59  → ends 18:00 same day
+#   Night     18:00 – 01:59  → ends 02:00 next day
+SESSION_END_HOUR = {'Morning': 12, 'Afternoon': 18, 'Night': 2}
 
 FEATURE_COLS = [
     'F_Syn_Price', 'F_Thai_Premium', 'F_Corr_XAU_USD',
@@ -254,10 +257,11 @@ def run_predictor():
 
         def assign_session(dt):
             h = dt.hour
-            if   6 <= h < 14: return f"{dt.date()}_Morning"
-            elif 14 <= h < 19: return f"{dt.date()}_Afternoon"
+            if   6 <= h < 12: return f"{dt.date()}_Morning"
+            elif 12 <= h < 18: return f"{dt.date()}_Afternoon"
             else:
-                base = dt.date() if h >= 19 else (dt - pd.Timedelta(days=1)).date()
+                # Night 18:00-01:59 — label by the date the session started (18:00 side)
+                base = dt.date() if h >= 18 else (dt - pd.Timedelta(days=1)).date()
                 return f"{base}_Night"
 
         df_m10['Session_ID']   = df_m10.index.map(assign_session)
@@ -347,7 +351,7 @@ def _session_end_time(session_id: str) -> datetime:
     end_hour     = SESSION_END_HOUR.get(session_type, 14)
 
     if session_type == 'Night':
-        # Night session ends next calendar day at 06:00 BKK
+        # Night 18:00 – 01:59 → ends 02:00 on the NEXT calendar day
         end_date = session_date + pd.Timedelta(days=1)
     else:
         end_date = session_date
